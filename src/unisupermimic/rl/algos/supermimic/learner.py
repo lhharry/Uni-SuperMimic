@@ -242,12 +242,14 @@ class SuperMimicLearner:
                 num_joints=self.mdp.num_joints,
                 context_dim=self.mdp.context_dim,
                 structured=self.cfg.wm_structured,
+                fixed_base=getattr(self.mdp, "fixed_base", False),
             )
         return WorldModel(
             hidden=self.cfg.wm_hidden,
             num_joints=self.mdp.num_joints,
             context_dim=self.mdp.context_dim,
             structured=self.cfg.wm_structured,
+            fixed_base=getattr(self.mdp, "fixed_base", False),
         )
 
     def _make_policy(self) -> Policy:

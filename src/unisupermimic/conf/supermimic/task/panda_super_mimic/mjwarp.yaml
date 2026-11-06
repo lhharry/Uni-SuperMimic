@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /task/panda_super_mimic/base
+  - _self_
+
+training:
+  task_name: PandaSuperMimic
+  sim_backend: mjwarp
+
+env:
+  mjwarp_nconmax: 64
+  mjwarp_njmax: 250

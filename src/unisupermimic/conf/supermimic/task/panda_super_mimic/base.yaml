@@ -1,0 +1,89 @@
+# @package _global_
+# Fixed-base SuperMimic on the wall-mounted Franka Panda, left arm only (J=7).
+# dual.yaml switches to both arms (J=14). See tools/build_panda_mjcf.py and
+# tools/build_panda_motions.py for the model and the motion pack.
+env:
+  seed: null
+  scene:
+    model_file: src/unisupermimic/assets/robots/panda/panda_left_task.xml
+    default_keyframe_name: home
+    entities:
+      robot:
+        root_body_name: mount
+        joint_names: &panda_joints
+          - left/joint1
+          - left/joint2
+          - left/joint3
+          - left/joint4
+          - left/joint5
+          - left/joint6
+          - left/joint7
+        actuator_names: *panda_joints
+        body_names: [mount]
+  sim_dt: 0.002
+  ctrl_dt: 0.02
+  max_episode_seconds: 10.0
+  auto_reset: true
+  scale_rewards_by_dt: false
+  observations:
+    policy:
+      enable_corruption: false
+      terms:
+        obs:
+          func: unisupermimic.tasks.motion_tracking.panda.supermimic.manager_terms.supermimic_obs
+          params: {command_name: motion}
+    future:
+      enable_corruption: false
+      terms:
+        goal:
+          func: unisupermimic.tasks.motion_tracking.panda.supermimic.manager_terms.supermimic_goal
+          params: {command_name: motion, num_frames: 10}
+  actions:
+    joint_pos:
+      _target_: unisupermimic.tasks.motion_tracking.panda.supermimic.manager_terms.PandaSuperMimicActionCfg
+      entity_name: robot
+      command_name: motion
+  commands:
+    motion:
+      _target_: unisupermimic.tasks.motion_tracking.panda.supermimic.manager_terms.PandaSuperMimicCommandCfg
+      entity_name: robot
+      variant: left
+      mjcf_path: src/unisupermimic/assets/robots/panda/panda_left_task.xml
+      eval_mode: false
+      gamma: 0.99
+      reset_noise: true
+      max_episode_steps: 500
+      goal_frames: 10
+      resampling_time_range: [1.0e9, 1.0e9]
+      motion_files:
+        - src/unisupermimic/assets/motions/panda/lafan1_panda_left.pt
+  events:
+    joint_offsets:
+      _target_: unilab.managers.EventTermCfg
+      func: unisupermimic.tasks.motion_tracking.panda.supermimic.manager_terms.PandaJointOffsetEvent
+      mode: reset
+      params: {command_name: motion}
+  terminations:
+    hard:
+      _target_: unilab.managers.TerminationTermCfg
+      func: unisupermimic.tasks.motion_tracking.panda.supermimic.manager_terms.supermimic_termination
+      params: {command_name: motion}
+    timeout:
+      _target_: unilab.managers.TerminationTermCfg
+      func: unisupermimic.tasks.motion_tracking.panda.supermimic.manager_terms.supermimic_timeout
+      time_out: true
+      params: {command_name: motion}
+    clip_end:
+      _target_: unilab.managers.TerminationTermCfg
+      func: unisupermimic.tasks.motion_tracking.panda.supermimic.manager_terms.supermimic_clip_end
+      time_out: true
+      params: {command_name: motion}
+  policy_observation_group: policy
+  critic_observation_group: future
+
+reward:
+  tracking:
+    _target_: unilab.managers.RewardTermCfg
+    func: unisupermimic.tasks.motion_tracking.panda.supermimic.manager_terms.supermimic_reward
+    weight: 1.0
+    params: {command_name: motion}

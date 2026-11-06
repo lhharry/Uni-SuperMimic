@@ -30,7 +30,7 @@ def main():
     opt.geomgroup[5] = 1
     cam = mujoco.MjvCamera()
     cam.lookat[:] = [0.35, 0, -0.1]
-    cam.distance, cam.azimuth, cam.elevation = 2.4, 180, -12
+    cam.distance, cam.azimuth, cam.elevation = 2.6, 145, -18
     out = a.out or REPO / "runs" / "panda_retarget" / "videos" / f"{a.clip}_{a.start:g}s.mp4"
     out.parent.mkdir(parents=True, exist_ok=True)
     out_fps = 30

@@ -64,6 +64,9 @@ class ArmIk:
         self._verts = [self._local_verts(g) for g in self.arm_geoms]
         self._geom_body = np.array([self.m.geom_bodyid[g] for g in self.arm_geoms])
         self._vgeom = np.concatenate([np.full(len(v), i) for i, v in enumerate(self._verts)])
+        # coarse cloud (<= 24 points per geom) for the inter-arm barrier
+        self._cverts = [v[:: max(1, len(v) // 24)] for v in self._verts]
+        self._cbody = np.concatenate([np.full(len(v), self._geom_body[i]) for i, v in enumerate(self._cverts)])
         m = self.m
         pid, tid, sid = m.geom("panel").id, m.geom("table").id, m.geom("keepout_side_left").id
         # planes as (normal, offset): clearance = n.p - off
@@ -92,7 +95,31 @@ class ArmIk:
         return (self.d.xpos[self.b_wrist].copy(), self.d.xpos[self.b_elbow].copy(), R[:, 2].copy())
 
     # -- IK -----------------------------------------------------------------
-    def solve(self, q_init, wrist_t, elbow_t, hand_dir, q_post, iters=30, tol=1e-4):
+    def coarse_world_verts(self):
+        return np.concatenate([v @ self.d.geom_xmat[g].reshape(3, 3).T + self.d.geom_xpos[g]
+                               for g, v in zip(self.arm_geoms, self._cverts)])
+
+    def _obstacle_rows(self, obstacle):
+        """Hinge rows keeping each body of this arm >= safe_dist from an obstacle point cloud."""
+        P = self.coarse_world_verts()
+        d2 = (P * P).sum(1)[:, None] + (obstacle * obstacle).sum(1)[None, :] - 2 * P @ obstacle.T
+        j = d2.argmin(1)
+        dist = np.sqrt(np.maximum(d2[np.arange(len(P)), j], 1e-12))
+        safe = self.weights.safe_dist
+        rows, jacs = [], []
+        close = dist < safe
+        for body in (np.unique(self._cbody[close]) if close.any() else []):
+            sel = np.flatnonzero(close & (self._cbody == body))
+            i = sel[np.argmin(dist[sel])]
+            n = (P[i] - obstacle[j[i]]) / dist[i]
+            mujoco.mj_jac(self.m, self.d, self._jp, self._jr, P[i], int(body))
+            rows.append(dist[i] - safe)
+            jacs.append(n @ self._jp[:, self.dadr])
+        if not rows:
+            return np.zeros(0), np.zeros((0, 7))
+        return np.array(rows), np.array(jacs)
+
+    def solve(self, q_init, wrist_t, elbow_t, hand_dir, q_post, iters=30, tol=1e-4, obstacle=None):
         w = self.weights
         q = np.clip(q_init.copy(), self.lo, self.hi)
         q_prev = q.copy()
@@ -109,6 +136,9 @@ class ArmIk:
             rl = np.where(q > shi, q - shi, np.where(q < slo, q - slo, 0.0))
             Jl = np.diag((rl != 0).astype(float))
             rc, Jc = self._collision_rows()
+            if obstacle is not None:
+                ro, Jo = self._obstacle_rows(obstacle)
+                rc, Jc = np.concatenate([rc, ro]), np.vstack([Jc, Jo])
             r = np.concatenate([w.wrist * (pw - wrist_t), w.elbow * (pe - elbow_t),
                                 w.hand_dir * (z - hand_dir), w.step * (q - q_prev),
                                 w.posture * (q - q_post), w.limit * rl, w.collision * rc])

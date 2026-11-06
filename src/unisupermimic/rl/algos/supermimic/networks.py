@@ -119,10 +119,15 @@ class WorldModel(nn.Module):
         context_dim: int = 33,
         structured: bool = False,
         dt: float = 0.02,
+        fixed_base: bool = False,
     ):
         super().__init__()
         if dt <= 0:
             raise ValueError(f"WorldModel dt must be positive, got {dt}")
+        # Fixed-base robots (task MDP has fixed_base=True): the root state is a
+        # constant, so integrate() passes it through instead of accumulating
+        # predicted root increments (which would only add drift).
+        self.fixed_base = fixed_base
         self.num_joints = num_joints
         self.context_dim = context_dim
         self.structured = structured
@@ -248,6 +253,8 @@ class WorldModel(nn.Module):
             d_rotation = d_rotation + rotation_drift
             d_joint_pos = d_joint_pos + joint_pos_drift
 
+        if self.fixed_base:
+            return (position, rotation, lin_vel, ang_vel, joint_pos + d_joint_pos, next_joint_vel)
         next_position = position + matvec(heading, d_position)
         next_rotation = matmul(rotation, so3_exp(d_rotation))
         return (

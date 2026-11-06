@@ -51,6 +51,13 @@ PANEL_TOP = 0.30             # above J1 (estimated from photos)
 HEAD_KEEPOUT = dict(y=0.15, depth=0.30, z0=PANEL_TOP)  # unused head unit
 
 TAU_MAX = np.array([87, 87, 87, 87, 12, 12, 12], dtype=float)
+# Real-robot joint impedance (panda-py JointPosition, franka_pi05/pi05_left.py); the task
+# models use position actuators with exactly these gains: tau = K (q_sp - q) - D qd.
+KP = np.array([360., 360., 360., 360., 150., 90., 30.])
+KD = np.array([50., 50., 50., 20., 20., 20., 10.])
+# Neutral pose q0 (mid-range of the retargeted references, tools/build_panda_motions.py).
+Q0 = {"left": [-0.508, -0.953, 0.025, -2.146, 0.046, 1.744, 0.039],
+      "right": [0.493, -0.939, -0.008, -2.138, 0.001, 2.119, -0.039]}
 
 ARMS = {
     # name: (y offset, base X axis, base Y axis) in world; base Z = +x (out of panel)
@@ -87,9 +94,11 @@ def load_arm(hand: bool) -> mujoco.MjSpec:
     return spec
 
 
-def build(arms: list[str]) -> mujoco.MjSpec:
+def build(arms: list[str], task: bool = False) -> mujoco.MjSpec:
+    """task=False: torque motors (analysis tools). task=True: SuperMimic task model with a
+    static 'mount' root body, real-robot PD position actuators and a 'home' keyframe at q0."""
     w = mujoco.MjSpec()
-    w.modelname = "panda_" + "_".join(arms)
+    w.modelname = "panda_" + "_".join(arms) + ("_task" if task else "")
     w.compiler.degree = False
     w.meshdir = "assets"
     w.option.timestep = 0.002
@@ -124,19 +133,34 @@ def build(arms: list[str]) -> mujoco.MjSpec:
                   pos=[HEAD_KEEPOUT["depth"] / 2 - MOUNT_OFFSET, 0, HEAD_KEEPOUT["z0"] + 0.4],
                   contype=0, conaffinity=0, group=5, rgba=red)
 
+    root = wb.add_body(name="mount") if task else wb
     for arm in arms:
         y, xa, ya = ARMS[arm]
-        frame = wb.add_frame(pos=[0, y, 0], quat=base_quat(xa, ya))
+        frame = root.add_frame(pos=[0, y, 0], quat=base_quat(xa, ya))
         child = load_arm(HAND[arm])
         frame.attach_body(child.body("link0"), f"{arm}/", "")
         w.add_exclude(bodyname1="panel", bodyname2=f"{arm}/link0")
         w.add_exclude(bodyname1="panel", bodyname2=f"{arm}/link1")
 
+    model = w.compile()
     for arm in arms:
         for i in range(7):
-            w.add_actuator(name=f"{arm}/motor{i + 1}", target=f"{arm}/joint{i + 1}",
-                           trntype=mujoco.mjtTrn.mjTRN_JOINT, ctrllimited=True,
-                           ctrlrange=[-TAU_MAX[i], TAU_MAX[i]])
+            j = f"{arm}/joint{i + 1}"
+            if not task:
+                w.add_actuator(name=f"{arm}/motor{i + 1}", target=j,
+                               trntype=mujoco.mjtTrn.mjTRN_JOINT, ctrllimited=True,
+                               ctrlrange=[-TAU_MAX[i], TAU_MAX[i]])
+                continue
+            act = w.add_actuator(name=j, target=j, trntype=mujoco.mjtTrn.mjTRN_JOINT)
+            act.gaintype = mujoco.mjtGain.mjGAIN_FIXED
+            act.biastype = mujoco.mjtBias.mjBIAS_AFFINE
+            act.gainprm[0] = KP[i]
+            act.biasprm[:3] = [0.0, -KP[i], -KD[i]]
+            act.ctrllimited, act.ctrlrange = True, model.joint(j).range
+            act.forcelimited, act.forcerange = True, [-TAU_MAX[i], TAU_MAX[i]]
+    if task:
+        q0 = np.concatenate([Q0[a] for a in arms])
+        w.add_key(name="home", qpos=q0, ctrl=q0)
     return w
 
 
@@ -147,8 +171,9 @@ def main() -> None:
     a.out.mkdir(parents=True, exist_ok=True)
     if not (a.out / "assets").exists():
         shutil.copytree(MENAGERIE / "assets", a.out / "assets")
-    for arms in (["left"], ["left", "right"]):
-        spec = build(arms)
+    for arms, task in ((["left"], False), (["left", "right"], False),
+                       (["left"], True), (["left", "right"], True)):
+        spec = build(arms, task)
         model = spec.compile()
         path = a.out / f"{spec.modelname}.xml"
         xml = spec.to_xml()

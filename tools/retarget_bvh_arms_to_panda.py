@@ -42,7 +42,7 @@ CANDIDATES = (
     + [f"fightAndSports1_subject{i}" for i in (1, 4)]
     + ["aiming1_subject1", "aiming1_subject4"]   # aiming2: both hands together on a gun, <25% valid
 )
-IK_WEIGHTS = IkWeights(elbow=0.02, posture=0.03, step=0.2)   # wrist-led; smooth through J2~0
+IK_WEIGHTS = IkWeights(elbow=0.05, posture=0.03, step=0.2)   # wrist-led; smooth through J2~0
 WRIST_TOL = 0.04
 CLEARANCE_MIN = 0.15
 
@@ -87,23 +87,31 @@ def targets(kp: dict, side: str, ik: ArmIk, pitch: float, k: float, c: np.ndarra
 _NEUTRAL: dict = {}
 
 
+def _branch(arm):
+    """Human-like branch: upper arm down-forward, elbow forward (J2 < 0), J1 mid-range.
+
+    left base Y points down, right base Y points up, so 'upper arm down' is
+    J1 = -pi/2 (left) / +pi/2 (right) with J2 < 0; mirror-symmetric postures.
+    """
+    s1 = -np.pi / 2 if arm == "left" else np.pi / 2
+    return np.array([s1, -0.9, 0.0, -1.6, 0.0, 1.9, 0.0])
+
+
 def neutral_posture(arm):
-    """Comfortable reference: wrist 0.3 m forward and 0.3 m below J2, clear of panel/table."""
+    """Comfortable reference: wrist 0.5 m forward, 0.15 m below J2, on the human-like branch."""
     if arm not in _NEUTRAL:
         ik = ArmIk(arm)
-        s1 = np.pi / 2 if arm == "left" else -np.pi / 2
-        q0 = np.array([s1, 0.8, 0.0, -2.0, 0.0, 2.2, 0.0])
-        wt = ik.shoulder + np.array([0.30, 0.0, -0.30])
+        q0 = _branch(arm)
+        wt = ik.shoulder + np.array([0.50, 0.0, -0.15])
         et = ik.shoulder + L_UPPER * np.array([0.3, 0.0, -0.95])
-        q = ik.solve(q0, wt, et, np.array([1.0, 0, 0]), q0, iters=300)
-        _NEUTRAL[arm] = q
+        _NEUTRAL[arm] = ik.solve(q0, wt, et, np.array([1.0, 0, 0]), q0, iters=300)
     return _NEUTRAL[arm]
 
 
 def _seeds(arm):
-    s1 = np.pi / 2 if arm == "left" else -np.pi / 2
-    return [np.array([s1 + d1, d2, d3, -1.8, 0, 2.0, 0.0])
-            for d1 in (-1.2, 0, 1.2) for d2 in (-0.9, 0.0, 0.9) for d3 in (-0.8, 0.8)]
+    b = _branch(arm)
+    return [b + np.array([d1, d2, d3, 0, 0, 0, 0])
+            for d1 in (-0.8, 0, 0.8) for d2 in (-0.5, 0.0, 0.4) for d3 in (-0.6, 0.6)]
 
 
 def seed_solve(ik: ArmIk, wt, et, hd, q_prev=None, q_post=None, cont_w=0.05):
@@ -113,6 +121,8 @@ def seed_solve(ik: ArmIk, wt, et, hd, q_prev=None, q_post=None, cont_w=0.05):
     for q0 in seeds:
         q = ik.solve(q0, wt, et, hd, q0 if q_post is None else q_post, iters=150)
         cost = np.linalg.norm(ik.fk(q)[0] - wt)
+        if q_post is not None:
+            cost += 0.02 * np.linalg.norm(q - q_post)
         if q_prev is not None:
             cost += cont_w * np.linalg.norm(q - q_prev)
         if cost < best:
@@ -121,14 +131,16 @@ def seed_solve(ik: ArmIk, wt, et, hd, q_prev=None, q_post=None, cont_w=0.05):
 
 
 def run_clip(ik: ArmIk, kp: dict, side: str, pitch, k, c, stride=1, clearance=True,
-             a0=180.0, amax=180.0, restart_tol=None):
+             a0=180.0, amax=180.0, restart_tol=None, obstacles=None):
+    """obstacles: optional per-output-frame point clouds (e.g. the other arm) to keep clear of."""
     wt, et, hd = targets(kp, side, ik, pitch, k, np.asarray(c, float), a0, amax)
     idx = np.arange(0, len(wt), stride)
     q_post = neutral_posture(ik.arm)
     q = seed_solve(ik, wt[0], et[0], hd[0], q_post=q_post)
     Q, err, clr = [], [], []
-    for i in idx:
-        q_new = ik.solve(q, wt[i], et[i], hd[i], q_post)
+    for n, i in enumerate(idx):
+        obs = None if obstacles is None else obstacles[n]
+        q_new = ik.solve(q, wt[i], et[i], hd[i], q_post, obstacle=obs)
         if restart_tol is not None and np.linalg.norm(ik.fk(q_new)[0] - wt[i]) > restart_tol:
             q_new = seed_solve(ik, wt[i], et[i], hd[i], q_prev=q, q_post=q_post)
         q = q_new
@@ -224,11 +236,18 @@ def _process_clip(clip: str):
     fps = kp["fps"]
     iks = {s: ArmIk(s, weights=IK_WEIGHTS) for s in ("left", "right")}
     Q, err = {}, {}
-    for side in ("left", "right"):
-        q, e, _, _ = run_clip(iks[side], kp, side, CHOSEN["pitch"], CHOSEN["k"], (0, 0, 0),
-                              stride=1, clearance=False, a0=CHOSEN["a0"], amax=CHOSEN["amax"])
-        Q[side] = gaussian_smooth(q, 2.0)
-        err[side] = e
+    # left first; the right arm then treats the left arm (coarse cloud) as an obstacle
+    q, e, _, _ = run_clip(iks["left"], kp, "left", CHOSEN["pitch"], CHOSEN["k"], (0, 0, 0),
+                          stride=1, clearance=False, a0=CHOSEN["a0"], amax=CHOSEN["amax"])
+    Q["left"], err["left"] = gaussian_smooth(q, 2.0), e
+    clouds = []
+    for t in range(len(Q["left"])):
+        iks["left"].set_q(Q["left"][t])
+        clouds.append(iks["left"].coarse_world_verts())
+    q, e, _, _ = run_clip(iks["right"], kp, "right", CHOSEN["pitch"], CHOSEN["k"], (0, 0, 0),
+                          stride=1, clearance=False, a0=CHOSEN["a0"], amax=CHOSEN["amax"],
+                          obstacles=clouds)
+    Q["right"], err["right"] = gaussian_smooth(q, 2.0), e
     L, R = iks["left"], iks["right"]
     m, d = L.m, L.d
     T = len(Q["left"])

@@ -1,0 +1,39 @@
+# @package _global_
+# Both arms (J=14).
+defaults:
+  - /task/panda_super_mimic/base
+  - _self_
+
+training:
+  task_name: PandaSuperMimic
+  sim_backend: mjwarp
+
+env:
+  mjwarp_nconmax: 64
+  mjwarp_njmax: 250
+  scene:
+    model_file: src/unisupermimic/assets/robots/panda/panda_left_right_task.xml
+    entities:
+      robot:
+        joint_names: &panda_dual_joints
+          - left/joint1
+          - left/joint2
+          - left/joint3
+          - left/joint4
+          - left/joint5
+          - left/joint6
+          - left/joint7
+          - right/joint1
+          - right/joint2
+          - right/joint3
+          - right/joint4
+          - right/joint5
+          - right/joint6
+          - right/joint7
+        actuator_names: *panda_dual_joints
+  commands:
+    motion:
+      variant: dual
+      mjcf_path: src/unisupermimic/assets/robots/panda/panda_left_right_task.xml
+      motion_files:
+        - src/unisupermimic/assets/motions/panda/lafan1_panda_dual.pt
