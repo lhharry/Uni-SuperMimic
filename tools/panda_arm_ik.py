@@ -209,3 +209,16 @@ class ArmIk:
                     best, who = dist, (self.m.geom(g1).name or self.m.body(self.m.geom_bodyid[g1]).name,
                                        self.m.geom(g2).name or self.m.body(self.m.geom_bodyid[g2]).name)
         return best, who
+
+
+def inter_arm_distance(a: ArmIk, b: ArmIk) -> float:
+    """Min vertex-to-vertex distance (m) between two arms at their current states.
+
+    mj_geomDistance mesh-vs-mesh occasionally returns spurious zeros (seen in
+    replay), so collision-mesh vertices are compared directly. Over-estimates
+    the true distance by at most about half the vertex spacing (~1 cm).
+    """
+    va = a.world_verts().astype(np.float32)
+    vb = b.world_verts().astype(np.float32)
+    d2 = (va * va).sum(1)[:, None] + (vb * vb).sum(1)[None, :] - 2.0 * va @ vb.T
+    return float(np.sqrt(max(d2.min(), 0.0)))

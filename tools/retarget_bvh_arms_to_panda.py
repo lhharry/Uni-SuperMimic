@@ -30,7 +30,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bvh_arms import arm_keypoints  # noqa: E402
-from panda_arm_ik import ArmIk, IkWeights  # noqa: E402
+from panda_arm_ik import ArmIk, IkWeights, inter_arm_distance  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 BVH_DIR = REPO / "data" / "lafan1_bvh"
@@ -246,7 +246,7 @@ def _process_clip(clip: str):
             c, w = ik.env_clearance()
             clr[side][t] = c
             who[side].append(w)
-        inter[t] = min(mujoco.mj_geomDistance(m, d, a, b, 0.3, ft) for a in L.arm_geoms for b in R.arm_geoms)
+        inter[t] = inter_arm_distance(L, R)
     valid = (clr["left"] >= CLEARANCE_MIN) & (clr["right"] >= CLEARANCE_MIN) & (inter >= CLEARANCE_MIN)
     Qb = np.concatenate([Q["left"], Q["right"]], axis=1)
     qd = np.gradient(Qb, axis=0) * fps
