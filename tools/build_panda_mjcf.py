@@ -8,7 +8,7 @@ World frame (human-like, the robot "faces" out of the mounting panel):
 
 Geometry comes from ~/harry/franka_mimic/config/stage0_geometry.yaml (tape
 measurements + read_state.py gravity fits, 2026-11-06):
-  - J1 axes 0.59 m apart, 0.64 m above the table, mounting surface 0.01 m
+  - J1 axes 0.55 m apart (tape 2026-11-12), 0.64 m above the table, mounting surface 0.01 m
     in front of the panel.
   - panda_left (192.168.3.100, Franka Hand) at +y, gravity along its base +Y.
   - panda_right (192.168.4.100, no hand) at -y, gravity along its base -Y,
@@ -42,13 +42,16 @@ MENAGERIE = REPO / "data" / "mujoco_menagerie" / "franka_emika_panda"
 OUT_DIR = REPO / "src" / "unisupermimic" / "assets" / "robots" / "panda"
 
 # --- workcell geometry (metres) -------------------------------------------
-BASE_SPACING = 0.59
+BASE_SPACING = 0.55          # J1-J1, tape between same-side flange edges 2026-11-12 (was 0.59 from rear bolts)
 J1_ABOVE_TABLE = 0.64
 MOUNT_OFFSET = 0.01          # base mounting surface in front of the panel
 TABLE_DEPTH = 0.86           # front edge measured from the panel
 TABLE_SIDE_OUTBOARD = 0.60   # table side edge outboard of each base
-PANEL_TOP = 0.30             # above J1 (estimated from photos)
-HEAD_KEEPOUT = dict(y=0.15, depth=0.30, z0=PANEL_TOP)  # unused head unit
+PANEL_TOP = 0.25             # above J1 (tape, 2026-11-10: panel top edge -> base flange centre)
+# Unused head unit (tape, 2026-11-10): its bracket hangs 0.16 m below the panel top edge
+# (electronics 0.14 m), sticks out 0.155 m from the panel; width read as 0.14 m, taken as
+# +-0.14 m about the centre line (conservative if 0.14 m is the total width).
+HEAD_KEEPOUT = dict(y=0.14, depth=0.155, z0=PANEL_TOP - 0.16)
 
 TAU_MAX = np.array([87, 87, 87, 87, 12, 12, 12], dtype=float)
 # Real-robot joint impedance (panda-py JointPosition, franka_pi05/pi05_left.py); the task
