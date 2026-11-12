@@ -102,10 +102,12 @@ class Mapping:
     safe_dist: float = 0.17
     soft_margin: float = 0.45
     posture: float = 0.03
+    elbow: float = 0.05            # weight of the human elbow-direction hint (v1: 0.05)
+    mirror_posture: bool = False   # right arm: posture target = mirror of the left solution (symmetric branches)
     wrist_tol_valid: float | None = None   # stage 5: wrist error is reported (D_w), not cut
 
     def weights(self) -> IkWeights:
-        return IkWeights(elbow=IK_WEIGHTS.elbow, posture=self.posture, step=IK_WEIGHTS.step,
+        return IkWeights(elbow=self.elbow, posture=self.posture, step=IK_WEIGHTS.step,
                          collision=self.collision, safe_dist=self.safe_dist, soft_margin=self.soft_margin)
 
 
@@ -195,7 +197,8 @@ def seed_solve(ik: ArmIk, wt, et, hd, q_prev=None, q_post=None, cont_w=0.05):
 
 
 def run_clip(ik: ArmIk, kp: dict, side: str, pitch, k, c, stride=1, clearance=True,
-             a0=180.0, amax=180.0, restart_tol=None, obstacles=None, mapping: Mapping | None = None):
+             a0=180.0, amax=180.0, restart_tol=None, obstacles=None, mapping: Mapping | None = None,
+             posture_seq=None):
     """obstacles: optional per-output-frame point clouds (e.g. the other arm) to keep clear of.
     mapping: a Mapping (overrides pitch/k/a0/amax)."""
     if mapping is not None:
@@ -203,10 +206,15 @@ def run_clip(ik: ArmIk, kp: dict, side: str, pitch, k, c, stride=1, clearance=Tr
     wt, et, hd = targets(kp, side, ik, pitch, k, np.asarray(c, float), a0, amax, mapping)
     idx = np.arange(0, len(wt), stride)
     q_post = neutral_posture(ik.arm)
-    q = seed_solve(ik, wt[0], et[0], hd[0], q_post=q_post)
+    if posture_seq is not None:      # per-frame posture target (e.g. the mirrored other arm)
+        q = ik.solve(posture_seq[0], wt[0], et[0], hd[0], posture_seq[0], iters=150)
+    else:
+        q = seed_solve(ik, wt[0], et[0], hd[0], q_post=q_post)
     Q, err, clr = [], [], []
     for n, i in enumerate(idx):
         obs = None if obstacles is None else obstacles[n]
+        if posture_seq is not None:
+            q_post = posture_seq[n]
         q_new = ik.solve(q, wt[i], et[i], hd[i], q_post, obstacle=obs)
         if restart_tol is not None and np.linalg.norm(ik.fk(q_new)[0] - wt[i]) > restart_tol:
             q_new = seed_solve(ik, wt[i], et[i], hd[i], q_prev=q, q_post=q_post)
@@ -257,8 +265,9 @@ def retarget_clip(clip: str, m: Mapping, stride: int = 1) -> dict:
     for t in range(len(Q["left"])):
         iks["left"].set_q(Q["left"][t])
         clouds.append(iks["left"].coarse_world_verts())
+    mirror = Q["left"] * np.array([-1, 1, -1, 1, -1, 1, -1.]) if m.mirror_posture else None
     q, e, _, _ = run_clip(iks["right"], kp, "right", 0, 0, (0, 0, 0), stride=stride, clearance=False,
-                          obstacles=clouds, mapping=m)
+                          obstacles=clouds, mapping=m, posture_seq=mirror)
     Q["right"], err["right"] = gaussian_smooth(q, 2.0 / stride), e
     L, R = iks["left"], iks["right"]
     d = L.d
