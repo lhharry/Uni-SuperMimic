@@ -120,14 +120,14 @@
     <camera name="front" pos="2.2 0 0.3" quat="0.546835 0.448298 0.448298 0.546835"/>
     <light pos="1.5 0 1.5" dir="-0.707107 0 -0.707107" diffuse="0.8 0.8 0.8"/>
     <body name="panel">
-      <geom name="panel" size="0.01 1.175 0.445" pos="-0.02 0 -0.195" type="box" rgba="0.6 0.6 0.62 1"/>
+      <geom name="panel" size="0.01 2.075 0.445" pos="-0.02 0 -0.195" type="box" rgba="0.6 0.6 0.62 1"/>
     </body>
     <body name="table">
-      <geom name="table" size="0.43 0.875 0.02" pos="0.42 0 -0.66" type="box" rgba="0.3 0.3 0.32 1"/>
+      <geom name="table" size="0.43 1.775 0.02" pos="0.42 0 -0.66" type="box" rgba="0.3 0.3 0.32 1"/>
     </body>
     <body name="keepout">
-      <geom name="keepout_side_left" size="0.6 0.01 0.8" pos="0.5 0.885 0" type="box" contype="0" conaffinity="0" group="5" rgba="1 0.2 0.2 0.15"/>
-      <geom name="keepout_side_right" size="0.6 0.01 0.8" pos="0.5 -0.885 0" type="box" contype="0" conaffinity="0" group="5" rgba="1 0.2 0.2 0.15"/>
+      <geom name="keepout_side_left" size="0.6 0.01 0.8" pos="0.5 1.785 0" type="box" contype="0" conaffinity="0" group="5" rgba="1 0.2 0.2 0.15"/>
+      <geom name="keepout_side_right" size="0.6 0.01 0.8" pos="0.5 -1.785 0" type="box" contype="0" conaffinity="0" group="5" rgba="1 0.2 0.2 0.15"/>
       <geom name="keepout_head" size="0.0775 0.14 0.4" pos="0.0675 0 0.49" type="box" contype="0" conaffinity="0" group="5" rgba="1 0.2 0.2 0.15"/>
     </body>
     <body name="mount">

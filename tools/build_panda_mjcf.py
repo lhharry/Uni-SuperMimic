@@ -14,8 +14,8 @@ measurements + read_state.py gravity fits, 2026-11-06):
   - panda_right (192.168.4.100, no hand) at -y, gravity along its base -Y,
     i.e. rotated 180 deg about the panel normal (mirror mount). Both base X
     axes point toward the other arm.
-  - table top 0.64 m below J1, front edge 0.86 m from the panel, side edges
-    0.60 m outboard of each base.
+  - table top 0.64 m below J1, front edge 0.86 m from the panel (side edges
+    0.60 m outboard of each base; modelled as extending to the side keep-outs, 1.50 m).
 
 Fingers are welded (no finger joints), so the model has exactly 7 hinge joints
 per arm and one torque motor per joint. All arm bodies use gravcomp=1 to match
@@ -46,7 +46,11 @@ BASE_SPACING = 0.55          # J1-J1, tape between same-side flange edges 2026-1
 J1_ABOVE_TABLE = 0.64
 MOUNT_OFFSET = 0.01          # base mounting surface in front of the panel
 TABLE_DEPTH = 0.86           # front edge measured from the panel
-TABLE_SIDE_OUTBOARD = 0.60   # table side edge outboard of each base
+TABLE_SIDE_OUTBOARD = 0.60   # physical table side edge outboard of each base (documentation only)
+# Side keep-out planes (stage 5, 2026-11-12): both sides are permanently free and the arms may
+# extend fully, so the planes sit beyond reach. The table top is treated as an infinite plane
+# (unknown things beside the table), so the table box and the panel are widened to match.
+SIDE_KEEPOUT_OUTBOARD = 1.50
 PANEL_TOP = 0.25             # above J1 (tape, 2026-11-10: panel top edge -> base flange centre)
 # Unused head unit (tape, 2026-11-10): its bracket hangs 0.16 m below the panel top edge
 # (electronics 0.14 m), sticks out 0.155 m from the panel; width read as 0.14 m, taken as
@@ -115,7 +119,7 @@ def build(arms: list[str], task: bool = False) -> mujoco.MjSpec:
     wb.add_camera(name="front", pos=[2.2, 0, 0.3], xyaxes=[0, 1, 0, -0.2, 0, 1])
 
     # panel (a static body so contacts with link0/link1 can be excluded)
-    ymax = BASE_SPACING / 2 + TABLE_SIDE_OUTBOARD
+    ymax = BASE_SPACING / 2 + SIDE_KEEPOUT_OUTBOARD
     panel = wb.add_body(name="panel")
     panel.add_geom(name="panel", type=mujoco.mjtGeom.mjGEOM_BOX,
                    size=[0.01, ymax + 0.3, (PANEL_TOP + J1_ABOVE_TABLE) / 2],
