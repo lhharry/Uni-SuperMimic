@@ -137,8 +137,16 @@ def main():
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--controllers", nargs="+", default=["policy", "pd", "pd_ff"])
     panda_sets.add_args(ap)      # which reference set to evaluate on (cross-evaluation: any ckpt x any set)
+    ap.add_argument("--policy-set", default=None,
+                    help="set the checkpoint was trained on (its q0/alpha action frame); default = --set")
     a = ap.parse_args()
-    ov = panda_sets.get(a.set).overrides("dual" if "dual" in a.task else "left")
+    variant = "dual" if "dual" in a.task else "left"
+    ref_set, pol_set = panda_sets.get(a.set), panda_sets.get(a.policy_set or a.set)
+    ov = [o for o in ref_set.overrides(variant) if "q0_alpha_file" not in o]
+    if not any("motion_files" in o for o in ov):      # v1 refs: keep the default pack
+        ov = []
+    ov.append(f"env.commands.motion.q0_alpha_file={pol_set.q0alpha.relative_to(panda_sets.REPO)}"
+              if pol_set.q0alpha else "env.commands.motion.q0_alpha_file=null")
     ckpt = torch.load(a.ckpt, map_location="cuda:0", weights_only=False)
     from unisupermimic.tasks.motion_tracking.panda.supermimic.motion import (
         compact_motion_clip_count,
@@ -150,14 +158,15 @@ def main():
     env = make_env(a.task, n, ov)
     mdp = env._supermimic_command.mdp
     policy, gf, hist = load_policy(mdp, ckpt, env.device)
-    result = {"ckpt": str(a.ckpt), "iteration": int(ckpt.get("iteration", -1)), "set": a.set}
+    result = {"ckpt": str(a.ckpt), "iteration": int(ckpt.get("iteration", -1)), "set": a.set,
+              "policy_set": a.policy_set or a.set}
     for ctrl in a.controllers:
         result[ctrl] = run(env, ctrl, policy, gf, hist)
     env.close()
     env.backend.close()
     txt = json.dumps(result, indent=1)
     print(txt)
-    out = a.out or a.ckpt.parent / (f"eval_{a.ckpt.stem}.json" if a.set == "v1" else f"eval_{a.ckpt.stem}_{a.set}.json")
+    out = a.out or a.ckpt.parent / f"eval_{a.ckpt.stem}_on_{a.set}.json"
     out.write_text(txt)
 
 

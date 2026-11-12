@@ -131,6 +131,20 @@ def goal_features(q: np.ndarray, qd: np.ndarray, variant: str, frames: int = 10)
         return lib.goal(torch.arange(n), frames).numpy()
 
 
+def excursion(q: np.ndarray) -> float:
+    """Mean over arms of the p90 angle (deg) between the J2->wrist direction and its segment median:
+    how much the arms actually move around (the stage-5 deploy selection)."""
+    out = []
+    for k, arm in enumerate(("left", "right")):
+        ik = ArmIk(arm)
+        d = np.array([ik.fk(x)[0] - ik.shoulder for x in q[::5, 7 * k:7 * k + 7]])
+        d /= np.linalg.norm(d, axis=1, keepdims=True)
+        med = np.median(d, axis=0)
+        med /= np.linalg.norm(med)
+        out.append(np.percentile(np.degrees(np.arccos(np.clip(d @ med, -1, 1))), 90))
+    return float(np.mean(out))
+
+
 def clearances(q: np.ndarray) -> tuple[float, float]:
     L, Rr = ArmIk("left"), ArmIk("right")
     env, inter = 1.0, 1.0
@@ -151,6 +165,10 @@ def main():
     ap.add_argument("--min-s", type=float, default=8.0, help="min retimed segment length")
     ap.add_argument("--max-s", type=float, default=40.0)
     ap.add_argument("--ease", type=float, default=1.5)
+    ap.add_argument("--select", choices=("clearance", "amplitude"), default="clearance",
+                    help="clearance: largest min clearance first (v1); amplitude: largest wrist-direction "
+                         "excursion first among refs with >= 0.15 m clearance (stage 5)")
+    ap.add_argument("--max-per-clip", type=int, default=99)
     panda_sets.add_args(ap, write=True)
     a = ap.parse_args()
     out = a.out.expanduser()
@@ -176,17 +194,28 @@ def main():
             continue
         q = ref[s:s + n, 7:21].astype(np.float64)
         env, inter = clearances(q)
-        cands.append((min(env, inter), name, q, env, inter))
+        if a.select == "amplitude":
+            if min(env, inter) < 0.15:
+                continue
+            score = excursion(q)
+        else:
+            score = min(env, inter)
+        cands.append((score, name, q, env, inter))
     cands.sort(key=lambda c: -c[0])
-    index = []
-    for score, name, q, env, inter in cands[: a.n_refs]:
+    index, per_clip, chosen = [], {}, []
+    for c in cands:
+        clip = c[1].rsplit("_seg", 1)[0]
+        if per_clip.get(clip, 0) < a.max_per_clip and len(chosen) < a.n_refs:
+            chosen.append(c)
+            per_clip[clip] = per_clip.get(clip, 0) + 1
+    for score, name, q, env, inter in chosen:
         qe, qde = ease(q, a.ease)
         env_e, inter_e = clearances(qe)
         np.savez(ref_dir / f"{name}.npz", q=qe.astype(np.float32), qd=qde.astype(np.float32), dt=DT,
                  goal_left=goal_features(qe, qde, "left"), goal_dual=goal_features(qe, qde, "dual"))
         row = dict(name=name, seconds=round(len(qe) * DT, 1), min_env_clearance=round(env_e, 3),
                    min_inter_arm=round(inter_e, 3), peak_speed=round(float(np.abs(qde).max()), 3),
-                   left_j1_range=round(float(np.ptp(qe[:, 0])), 2))
+                   left_j1_range=round(float(np.ptp(qe[:, 0])), 2), select=a.select, score=round(float(score), 3))
         index.append(row)
         print(row)
     (ref_dir / "index.json").write_text(json.dumps(index, indent=1))
