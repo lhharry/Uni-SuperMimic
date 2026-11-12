@@ -50,7 +50,11 @@ def grid(name: str) -> list[rt.Mapping]:
     out = [replace(rt.V1, wrist_tol_valid=None)]                       # index 0 = v1b, the baseline
     if name == "smoke":
         return out + [rt.Mapping(a0=30, out=180, up=180, down=60, inn=50, wrist_tol_valid=None)]
-    for a0, o, u, dn, inn in itertools.product((30, 45), (90, 120, 180), (90, 120, 180), (50, 60, 70), (40, 50)):
+    if name == "wide":
+        axes = ((30, 45), (90, 120, 180), (90, 120, 180), (50, 60, 70), (40, 50))   # 108: ~2 h on this PC
+    else:
+        axes = ((30,), (90, 120, 180), (90, 120, 180), (50, 60, 70), (50,))         # 27: ~35 min
+    for a0, o, u, dn, inn in itertools.product(*axes):
         out.append(rt.Mapping(a0=a0, out=o, up=u, down=dn, inn=inn, wrist_tol_valid=None))
     return out
 
@@ -144,7 +148,7 @@ def select(res: list[dict]) -> list[int]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--grid", default="default", choices=("default", "smoke"))
+    ap.add_argument("--grid", default="default", choices=("default", "wide", "smoke"))
     ap.add_argument("--clips", nargs="+", default=None)
     ap.add_argument("--stride", type=int, default=2)
     ap.add_argument("--workers", type=int, default=30)
