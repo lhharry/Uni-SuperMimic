@@ -57,6 +57,7 @@ env:
       resampling_time_range: [1.0e9, 1.0e9]
       motion_files:
         - src/unisupermimic/assets/motions/panda/lafan1_panda_left.pt
+      q0_alpha_file: null   # reference sets other than v1: tools/panda_sets.py overrides
   events:
     joint_offsets:
       _target_: unilab.managers.EventTermCfg

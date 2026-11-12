@@ -84,6 +84,9 @@ class PandaSuperMimicCommandCfg(CommandTermCfg):
     max_episode_steps: int = 500
     goal_frames: int = 10
     resampling_time_range: tuple[float, float] = (1.0e9, 1.0e9)
+    # JSON {"q0": {arm: [7]}, "alpha": {arm: [7]}} from tools/derive_q0_alpha.py for a reference
+    # set other than v1; None = the v1 constants in robot.py.
+    q0_alpha_file: str | None = None
 
     def build(self, env: ManagerBasedRlEnv) -> PandaSuperMimicCommand:
         return PandaSuperMimicCommand(self, env)
@@ -108,9 +111,10 @@ class PandaSuperMimicCommand(CommandTerm):
         self.J = len(names)
         self.kin = FixedBaseKinematics(cfg.mjcf_path, device, names, R.tracked_bodies(cfg.variant), R.ROOT_BODY)
         self.motion = MotionLib(cfg.motion_files, self.kin, device)
-        q0 = torch.tensor(R.per_joint(R.Q0, cfg.variant), dtype=torch.float32, device=device)
+        q0_tab, alpha_tab = R.load_q0_alpha(cfg.q0_alpha_file)
+        q0 = torch.tensor(R.per_joint(q0_tab, cfg.variant), dtype=torch.float32, device=device)
         self.default_q = q0.expand(self.num_envs, -1).clone()
-        self.alpha = torch.tensor(R.per_joint(R.ALPHA, cfg.variant), dtype=torch.float32, device=device)
+        self.alpha = torch.tensor(R.per_joint(alpha_tab, cfg.variant), dtype=torch.float32, device=device)
         self.mdp = FixedBaseMDP(self.kin, self.motion, q0.clone(), RewardCfg())
         self.gamma = float(cfg.gamma)
         self.eval_mode = cfg.eval_mode

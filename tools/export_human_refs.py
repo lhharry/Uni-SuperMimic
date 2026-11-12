@@ -21,8 +21,8 @@ import json
 from pathlib import Path
 
 import numpy as np
-
-from build_panda_motions import CONTROL_DT, RET, V_REF, _maxfilt, _smooth
+import panda_sets
+from build_panda_motions import CONTROL_DT, V_REF, _maxfilt, _smooth
 from bvh_arms import _Y_TO_Z_UP, global_positions, read_bvh
 from retarget_bvh_arms_to_panda import BVH_DIR
 
@@ -85,12 +85,15 @@ def torso_frame_skeleton(clip: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, default=Path("~/harry/franka_mimic"))
+    panda_sets.add_args(ap)
     a = ap.parse_args()
-    out = a.out.expanduser()
-    (out / "refs" / "human").mkdir(parents=True, exist_ok=True)
+    rs = panda_sets.get(a.set)
+    RET = rs.ret
+    refs = a.out.expanduser() / "refs" / rs.name
+    (refs / "human").mkdir(parents=True, exist_ok=True)
     summary = json.loads((RET / "summary.json").read_text())
     cache = {}
-    for ref in sorted((out / "refs").glob("*_seg*.npz")):
+    for ref in sorted(refs.glob("*_seg*.npz")):
         clip, seg = ref.stem.rsplit("_seg", 1)
         if not seg.isdigit():      # windows cut by export_ref_window.py write their own skeleton
             continue
@@ -110,7 +113,7 @@ def main():
         i0 = np.clip(np.floor(src_frame).astype(int), 0, len(S) - 2)
         w = (src_frame - i0)[:, None, None]
         pos = (1 - w) * S[i0] + w * S[i0 + 1]
-        np.savez(out / "refs" / "human" / f"{ref.stem}.npz", pos=pos[: len(robot)].astype(np.float32),
+        np.savez(refs / "human" / f"{ref.stem}.npz", pos=pos[: len(robot)].astype(np.float32),
                  parents=parents, names=np.array(names), src_frame=src_frame[: len(robot)], dt=DT)
         print(f"{ref.stem}: {len(robot)} ticks ({len(k)} mapped), source frames {src_frame[0]:.0f}-{src_frame[-1]:.0f}, "
               f"robot-ref check max|dq| = {err:.2e} rad")

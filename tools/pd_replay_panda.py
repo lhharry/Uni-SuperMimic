@@ -28,6 +28,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import panda_sets  # noqa: E402
 from panda_arm_ik import ArmIk, inter_arm_distance  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
@@ -92,8 +93,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=24)
     ap.add_argument("--limit", type=int, default=0, help="only the first N segments")
+    panda_sets.add_args(ap)
     a = ap.parse_args()
-    pack = torch.load(PACK)
+    rs = panda_sets.get(a.set)
+    pack = torch.load(rs.pack("dual"))
     ref = pack["ref"].numpy().astype(np.float64)
     segs = [(n, ref[s:s + ln]) for n, s, ln in zip(pack["names"], pack["starts"], pack["lengths"])]
     if a.limit:
@@ -114,7 +117,8 @@ def main():
               f"sat_frac={avg('sat_frac'):.2e}  contacts={sum(x['contacts'] for x in v)}  "
               f"min_clear={min(x['min_clearance'] for x in v):.3f} m  "
               f"min_inter={min(x['min_inter_arm'] for x in v):.3f} m", flush=True)
-    dst = REPO / "runs" / "panda_retarget" / "pd_replay.json"
+    # v1's original pd_replay.json (old geometry) is kept; re-runs on v1 go next to it
+    dst = rs.ret / (("pd_replay_rerun" if rs.name == "v1" else "pd_replay") + (f"_limit{a.limit}" if a.limit else "") + ".json")
     dst.write_text(json.dumps(out, indent=1))
     print(dst)
 

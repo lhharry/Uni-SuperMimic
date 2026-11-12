@@ -31,6 +31,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bvh_arms import arm_keypoints  # noqa: E402
 from panda_arm_ik import ArmIk, IkWeights, inter_arm_distance  # noqa: E402
+import panda_sets  # noqa: E402
+
+RET_DIR = panda_sets.get("v1").ret   # set in main() from --set
 
 REPO = Path(__file__).resolve().parents[1]
 BVH_DIR = REPO / "data" / "lafan1_bvh"
@@ -194,8 +197,17 @@ def main():
     ap.add_argument("--amax", type=float, nargs="+", default=[70, 80])
     ap.add_argument("--stride", type=int, default=6)
     ap.add_argument("--workers", type=int, default=24)
-    ap.add_argument("--out", type=Path, default=REPO / "runs" / "panda_retarget" / "sweep.json")
+    ap.add_argument("--out", type=Path, default=None, help="sweep output (default <set dir>/sweep.json)")
+    ap.add_argument("--set", default=None, help="reference set to write (required for --process; v1 is frozen)")
+    ap.add_argument("--allow-v1", action="store_true")
     a = ap.parse_args()
+    global RET_DIR
+    if a.process and not a.set:
+        raise SystemExit("--process needs --set (v2, v1b, cand_A, ...)")
+    RET_DIR = panda_sets.get(a.set or "scratch", write=True, allow_v1=a.allow_v1).ret
+    if a.out is None:
+        a.out = RET_DIR / "sweep.json"
+    a.out.parent.mkdir(parents=True, exist_ok=True)
     if a.sweep:
         sweep(a)
     if a.process:
@@ -275,7 +287,7 @@ def _process_clip(clip: str):
         segs.append(dict(start=a, end=b, seconds=(b - a) / fps, peak_speed=peak,
                          p99_speed=float(np.percentile(np.abs(qd[a:b]).max(axis=1), 99)),
                          slowdown=max(1.0, peak / SPEED_REF)))
-    out_dir = REPO / "runs" / "panda_retarget" / "clips"
+    out_dir = RET_DIR / "clips"
     out_dir.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(out_dir / f"{clip}.npz", q=Qb, fps=fps, valid=valid, clr_left=clr["left"],
                         clr_right=clr["right"], inter=inter, err_left=err["left"], err_right=err["right"])
@@ -299,7 +311,7 @@ def process(args):
             seg_s = sum(x["seconds"] for x in s["segments"])
             print(f"{clip:28s} {s['seconds']:6.1f}s valid={s['valid']:.2f} segs={len(s['segments'])} "
                   f"seg_total={seg_s:6.1f}s fails={ {k: round(v, 2) for k, v in s['fails'].items() if v > 0.01} }", flush=True)
-    (REPO / "runs" / "panda_retarget" / "summary.json").write_text(json.dumps(summary, indent=1))
+    (RET_DIR / "summary.json").write_text(json.dumps(summary, indent=1))
 
 
 if __name__ == "__main__":

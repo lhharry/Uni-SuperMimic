@@ -3,8 +3,9 @@
 Gains are the real robot's joint impedance (panda-py JointPosition, values from
 franka_pi05/pi05_left.py); the task MJCF uses position actuators with the same
 gains, so q_sp = q0 + xi + alpha * a is the setpoint sent to the robot.
-Q0 / ALPHA come from the retargeted references (tools/build_panda_motions.py):
-q0 = mid-range of each joint, alpha = max deviation / 4.
+Q0 / ALPHA come from the retargeted references by one rule (tools/derive_q0_alpha.py):
+q0 = mid-range of each joint, alpha = max deviation / 4. The constants below are reference
+set v1; other sets pass their own via PandaSuperMimicCommandCfg.q0_alpha_file.
 """
 
 from __future__ import annotations
@@ -29,6 +30,20 @@ ALPHA = {
     "left": [0.501, 0.146, 0.220, 0.183, 0.094, 0.127, 0.067],
     "right": [0.498, 0.140, 0.207, 0.179, 0.144, 0.255, 0.096],
 }
+
+
+def load_q0_alpha(path: str | None) -> tuple[dict, dict]:
+    """(Q0, ALPHA) tables: the v1 constants above, or those of another reference set."""
+    if not path:
+        return Q0, ALPHA
+    import json
+    from pathlib import Path
+
+    p = Path(path)
+    if not p.is_absolute() and not p.exists():
+        p = Path(__file__).resolve().parents[6] / p      # repo-relative, like motion_files
+    d = json.loads(p.read_text())
+    return d["q0"], d["alpha"]
 
 
 def joint_names(variant: str) -> list[str]:

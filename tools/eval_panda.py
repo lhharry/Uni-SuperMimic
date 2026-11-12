@@ -20,6 +20,7 @@ import argparse
 import json
 from pathlib import Path
 
+import panda_sets
 import torch
 from hydra import compose, initialize_config_dir
 from unilab.base.config_adapter import create_env
@@ -32,10 +33,10 @@ from unisupermimic.rl.contracts.supermimic import SUPERMIMIC_STATE_KEY, SUPERMIM
 from unisupermimic.scripts.train_supermimic import build_env_override
 
 
-def make_env(task: str, num_envs: int):
+def make_env(task: str, num_envs: int, overrides=()):
     cfg_dir = Path(unisupermimic.__file__).resolve().parent / "conf" / "supermimic"
     with initialize_config_dir(version_base="1.3", config_dir=str(cfg_dir)):
-        cfg = compose(config_name="config", overrides=[f"task={task}"])
+        cfg = compose(config_name="config", overrides=[f"task={task}", *overrides])
     ensure_registries()
     return create_env(cfg, num_envs=num_envs,
                       env_cfg_override=build_env_override(cfg, eval_mode=True, learner_device="cuda:0"))
@@ -135,24 +136,28 @@ def main():
     ap.add_argument("--task", default="panda_super_mimic/mjwarp")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--controllers", nargs="+", default=["policy", "pd", "pd_ff"])
+    panda_sets.add_args(ap)      # which reference set to evaluate on (cross-evaluation: any ckpt x any set)
     a = ap.parse_args()
+    ov = panda_sets.get(a.set).overrides("dual" if "dual" in a.task else "left")
     ckpt = torch.load(a.ckpt, map_location="cuda:0", weights_only=False)
-    from unisupermimic.tasks.motion_tracking.panda.supermimic.motion import compact_motion_clip_count
+    from unisupermimic.tasks.motion_tracking.panda.supermimic.motion import (
+        compact_motion_clip_count,
+    )
     probe_cfg_dir = Path(unisupermimic.__file__).resolve().parent / "conf" / "supermimic"
     with initialize_config_dir(version_base="1.3", config_dir=str(probe_cfg_dir)):
-        cfg = compose(config_name="config", overrides=[f"task={a.task}"])
+        cfg = compose(config_name="config", overrides=[f"task={a.task}", *ov])
     n = compact_motion_clip_count(str(cfg.env.commands.motion.motion_files[0]))
-    env = make_env(a.task, n)
+    env = make_env(a.task, n, ov)
     mdp = env._supermimic_command.mdp
     policy, gf, hist = load_policy(mdp, ckpt, env.device)
-    result = {"ckpt": str(a.ckpt), "iteration": int(ckpt.get("iteration", -1))}
+    result = {"ckpt": str(a.ckpt), "iteration": int(ckpt.get("iteration", -1)), "set": a.set}
     for ctrl in a.controllers:
         result[ctrl] = run(env, ctrl, policy, gf, hist)
     env.close()
     env.backend.close()
     txt = json.dumps(result, indent=1)
     print(txt)
-    out = a.out or a.ckpt.parent / f"eval_{a.ckpt.stem}.json"
+    out = a.out or a.ckpt.parent / (f"eval_{a.ckpt.stem}.json" if a.set == "v1" else f"eval_{a.ckpt.stem}_{a.set}.json")
     out.write_text(txt)
 
 

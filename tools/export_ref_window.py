@@ -18,8 +18,8 @@ import json
 from pathlib import Path
 
 import numpy as np
-
-from export_deploy import DT, PACK, RET, clearances, ease, goal_features
+import panda_sets
+from export_deploy import DT, clearances, ease, goal_features
 from export_human_refs import ease_times, torso_frame_skeleton, warp_times
 
 
@@ -31,8 +31,12 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--ease", type=float, default=1.5)
     ap.add_argument("--out", type=Path, default=Path("~/harry/franka_mimic"))
+    panda_sets.add_args(ap)      # adds a reference to that set's deploy dir; never touches its packs
     a = ap.parse_args()
+    rs = panda_sets.get(a.set)
+    RET, PACK = rs.ret, rs.pack("dual")
     out = a.out.expanduser()
+    refs = out / "refs" / rs.name
     clip, seg = a.segment.rsplit("_seg", 1)
     if not a.name.startswith(f"{clip}_seg"):
         raise SystemExit(f"--name must start with {clip}_seg")
@@ -54,7 +58,7 @@ def main():
     q = q_pack[lo:hi]
     qe, qde = ease(q, a.ease)
     env, inter = clearances(qe)
-    np.savez(out / "refs" / f"{a.name}.npz", q=qe.astype(np.float32), qd=qde.astype(np.float32), dt=DT,
+    np.savez(refs / f"{a.name}.npz", q=qe.astype(np.float32), qd=qde.astype(np.float32), dt=DT,
              goal_left=goal_features(qe, qde, "left"), goal_dual=goal_features(qe, qde, "dual"))
 
     # matching human skeleton: eased tick -> window sample -> segment sample -> source frame
@@ -63,15 +67,15 @@ def main():
     S, names, parents, _ = torso_frame_skeleton(clip)
     i0 = np.clip(np.floor(src_frame).astype(int), 0, len(S) - 2)
     w = (src_frame - i0)[:, None, None]
-    (out / "refs" / "human").mkdir(parents=True, exist_ok=True)
-    np.savez(out / "refs" / "human" / f"{a.name}.npz", pos=((1 - w) * S[i0] + w * S[i0 + 1]).astype(np.float32),
+    (refs / "human").mkdir(parents=True, exist_ok=True)
+    np.savez(refs / "human" / f"{a.name}.npz", pos=((1 - w) * S[i0] + w * S[i0 + 1]).astype(np.float32),
              parents=parents, names=np.array(names), src_frame=src_frame, dt=DT)
 
     row = dict(name=a.name, seconds=round(len(qe) * DT, 1), min_env_clearance=round(env, 3),
                min_inter_arm=round(inter, 3), peak_speed=round(float(np.abs(qde).max()), 3),
                left_j1_range=round(float(np.ptp(qe[:, 0])), 2),
                source=f"{clip} {a.src[0]:g}-{a.src[1]:g} s (window of {a.segment})")
-    idx_path = out / "refs" / "index.json"
+    idx_path = refs / "index.json"
     index = [r for r in json.loads(idx_path.read_text()) if r["name"] != a.name]
     idx_path.write_text(json.dumps(index + [row], indent=1))
     print(row)

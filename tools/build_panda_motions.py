@@ -23,10 +23,10 @@ import json
 from pathlib import Path
 
 import numpy as np
+import panda_sets
 import torch
 
 REPO = Path(__file__).resolve().parents[1]
-RET = REPO / "runs" / "panda_retarget"
 OUT = REPO / "src" / "unisupermimic" / "assets" / "motions" / "panda"
 CONTROL_DT = 0.02
 V_REF = 0.3
@@ -88,7 +88,10 @@ def pack(segs: list[tuple[str, np.ndarray, np.ndarray]], J: int) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--v-ref", type=float, default=V_REF)
+    panda_sets.add_args(ap, write=True)
     a = ap.parse_args()
+    rs = panda_sets.get(a.set, write=True, allow_v1=a.allow_v1)
+    RET = rs.ret
     summary = json.loads((RET / "summary.json").read_text())
     segs, report = [], []
     for clip, s in summary.items():
@@ -101,9 +104,10 @@ def main():
             report.append(dict(name=name, src_s=seg["seconds"], out_s=len(q50) * CONTROL_DT,
                                factor=factor, peak=float(np.abs(qd50).max())))
     OUT.mkdir(parents=True, exist_ok=True)
-    torch.save(pack(segs, 14), OUT / "lafan1_panda_dual.pt")
+    torch.save(pack(segs, 14), rs.pack("dual"))
     left = [(n, q[:, :7], qd[:, :7]) for n, q, qd in segs]
-    torch.save(pack(left, 7), OUT / "lafan1_panda_left.pt")
+    torch.save(pack(left, 7), rs.pack("left"))
+    print(f"wrote {rs.pack('dual').name}, {rs.pack('left').name}")
     (RET / "motions_report.json").write_text(json.dumps(report, indent=1))
     src = sum(r["src_s"] for r in report)
     out = sum(r["out_s"] for r in report)

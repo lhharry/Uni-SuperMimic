@@ -34,14 +34,15 @@ from unisupermimic.tasks.motion_tracking.panda.supermimic.kinematics import Fixe
 from unisupermimic.tasks.motion_tracking.panda.supermimic.motion import MotionLib  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
-PACK = REPO / "src" / "unisupermimic" / "assets" / "motions" / "panda" / "lafan1_panda_dual.pt"
-RET = REPO / "runs" / "panda_retarget"
+import panda_sets  # noqa: E402
+
 DT = 0.02
 
 
-def export_policy(ckpt_path: Path, variant: str, out: Path) -> None:
+def export_policy(ckpt_path: Path, variant: str, out: Path, q0_alpha_file=None) -> None:
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     args = ck["args"]
+    q0_tab, alpha_tab = R.load_q0_alpha(str(q0_alpha_file) if q0_alpha_file else None)
     J = len(R.joint_names(variant))
     obs_dim, goal_dim = 3 * J, (15 + 2 * J) * int(args["goal_frames"])
     networks.AMP_DTYPE = None
@@ -60,7 +61,7 @@ def export_policy(ckpt_path: Path, variant: str, out: Path) -> None:
         arrays[f"{name}_mean"] = norm.mean.numpy().astype(np.float32)
         arrays[f"{name}_std"] = norm.std().numpy().astype(np.float32)
     meta = dict(variant=variant, hist=int(args["hist"]), goal_frames=int(args["goal_frames"]),
-                q0=R.per_joint(R.Q0, variant), alpha=R.per_joint(R.ALPHA, variant),
+                q0=R.per_joint(q0_tab, variant), alpha=R.per_joint(alpha_tab, variant),
                 joint_names=R.joint_names(variant), kp=R.per_joint(R.KP, variant), kd=R.per_joint(R.KD, variant),
                 ckpt=str(ckpt_path), iteration=int(ck.get("iteration", -1)))
     arrays["meta"] = np.array(json.dumps(meta))
@@ -150,21 +151,24 @@ def main():
     ap.add_argument("--min-s", type=float, default=8.0, help="min retimed segment length")
     ap.add_argument("--max-s", type=float, default=40.0)
     ap.add_argument("--ease", type=float, default=1.5)
+    panda_sets.add_args(ap, write=True)
     a = ap.parse_args()
     out = a.out.expanduser()
-    (out / "policy").mkdir(parents=True, exist_ok=True)
-    (out / "refs").mkdir(parents=True, exist_ok=True)
+    rs = panda_sets.get(a.set, write=True, allow_v1=a.allow_v1)
+    pol_dir, ref_dir = out / "policy" / rs.name, out / "refs" / rs.name     # franka_mimic layout per set
+    pol_dir.mkdir(parents=True, exist_ok=True)
+    ref_dir.mkdir(parents=True, exist_ok=True)
     (out / "model").mkdir(parents=True, exist_ok=True)
 
-    export_policy(a.ckpt_left, "left", out / "policy" / "left.npz")
-    export_policy(a.ckpt_dual, "dual", out / "policy" / "dual.npz")
+    export_policy(a.ckpt_left, "left", pol_dir / "left.npz", rs.q0alpha)
+    export_policy(a.ckpt_dual, "dual", pol_dir / "dual.npz", rs.q0alpha)
 
     src = REPO / "src" / "unisupermimic" / "assets" / "robots" / "panda"
     shutil.copy(src / "panda_left_right.xml", out / "model" / "panda_left_right.xml")
     if not (out / "model" / "assets").exists():
         shutil.copytree(src / "assets", out / "model" / "assets")
 
-    pack = torch.load(PACK, weights_only=True)
+    pack = torch.load(rs.pack("dual"), weights_only=True)
     ref = pack["ref"].numpy()
     cands = []
     for name, s, n in zip(pack["names"], pack["starts"], pack["lengths"]):
@@ -178,14 +182,14 @@ def main():
     for score, name, q, env, inter in cands[: a.n_refs]:
         qe, qde = ease(q, a.ease)
         env_e, inter_e = clearances(qe)
-        np.savez(out / "refs" / f"{name}.npz", q=qe.astype(np.float32), qd=qde.astype(np.float32), dt=DT,
+        np.savez(ref_dir / f"{name}.npz", q=qe.astype(np.float32), qd=qde.astype(np.float32), dt=DT,
                  goal_left=goal_features(qe, qde, "left"), goal_dual=goal_features(qe, qde, "dual"))
         row = dict(name=name, seconds=round(len(qe) * DT, 1), min_env_clearance=round(env_e, 3),
                    min_inter_arm=round(inter_e, 3), peak_speed=round(float(np.abs(qde).max()), 3),
                    left_j1_range=round(float(np.ptp(qe[:, 0])), 2))
         index.append(row)
         print(row)
-    (out / "refs" / "index.json").write_text(json.dumps(index, indent=1))
+    (ref_dir / "index.json").write_text(json.dumps(index, indent=1))
 
 
 if __name__ == "__main__":
