@@ -11,9 +11,10 @@ angles beyond a0 map linearly onto [a0, amax]) because the Panda J2 limit
 (+-101 deg from the panel normal, minus margin) cannot point along the panel,
 and the table sits only 0.64 m below J1. k scales reach; c shifts the workspace. Actor's left arm -> panda_left, right arm -> panda_right.
 
-Modes:
-  --sweep   evaluate a grid of (pitch, k, c) on sub-sampled frames of the
-            candidate clips and print reachability tables.
+Stage 5: the mapping is a Mapping (cone = v1, or anisotropic per direction), and the
+sweep (tools/retarget_sweep.py) runs exactly this pipeline (retarget_clip) on a grid.
+
+    uv run python tools/retarget_bvh_arms_to_panda.py --process --set v2 --mapping m.json
 """
 
 from __future__ import annotations
@@ -23,15 +24,16 @@ import itertools
 import json
 import sys
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import mujoco
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import panda_sets  # noqa: E402
 from bvh_arms import arm_keypoints  # noqa: E402
 from panda_arm_ik import ArmIk, IkWeights, inter_arm_distance  # noqa: E402
-import panda_sets  # noqa: E402
 
 RET_DIR = panda_sets.get("v1").ret   # set in main() from --set
 
@@ -74,13 +76,71 @@ def compress_cone(v: np.ndarray, a0: float, amax: float) -> np.ndarray:
     return out * n
 
 
+@dataclass(frozen=True)
+class Mapping:
+    """Direction mapping + IK barrier settings of one retarget (stage 5).
+
+    kind="cone":  compress_cone(a0, amax), the v1 mapping.
+    kind="aniso": polar angle theta from +x is kept up to a0, beyond it saturates softly toward
+                  amax(phi): theta' = a0 + (amax - a0) tanh((theta - a0) / (amax - a0)); amax >= 179
+                  means no squeeze in that direction. amax(phi) blends the four sector values
+                  (out = away from the other arm, up, in, down) with cos^2 weights, so adjacent
+                  sectors always sum to one.
+    wrist_tol_valid: frames whose wrist misses its (mapped) target by more than this are invalid
+                  (None = v1 behaviour, clearance only).
+    """
+    kind: str = "aniso"
+    a0: float = 30.0
+    amax: float = 50.0
+    out: float = 90.0
+    up: float = 90.0
+    inn: float = 50.0
+    down: float = 50.0
+    pitch: float = 0.0
+    k: float = 1.0
+    collision: float = 2.0
+    safe_dist: float = 0.17
+    soft_margin: float = 0.45
+    posture: float = 0.03
+    wrist_tol_valid: float | None = None   # stage 5: wrist error is reported (D_w), not cut
+
+    def weights(self) -> IkWeights:
+        return IkWeights(elbow=IK_WEIGHTS.elbow, posture=self.posture, step=IK_WEIGHTS.step,
+                         collision=self.collision, safe_dist=self.safe_dist, soft_margin=self.soft_margin)
+
+
+V1 = Mapping(kind="cone", a0=30.0, amax=50.0, wrist_tol_valid=None)   # = the old CHOSEN
+
+
+def map_dirs(v: np.ndarray, side: str, m: Mapping) -> np.ndarray:
+    if m.kind == "cone":
+        return compress_cone(v, m.a0, m.amax)
+    n = np.linalg.norm(v, axis=1, keepdims=True) + 1e-9
+    u = v / n
+    th = np.arccos(np.clip(u[:, 0], -1, 1))
+    s = 1.0 if side == "left" else -1.0              # +y is "out" for the left arm
+    phi = np.arctan2(u[:, 2], s * u[:, 1])           # out 0, up +90, in 180, down -90 deg
+    w = lambda c: np.maximum(np.cos(phi - np.deg2rad(c)), 0.0) ** 2  # noqa: E731
+    amax = np.deg2rad(m.out * w(0) + m.up * w(90) + m.inn * w(180) + m.down * w(-90))
+    a0 = np.deg2rad(m.a0)
+    span = np.maximum(amax - a0, 1e-6)
+    squeezed = a0 + span * np.tanh((th - a0) / span)
+    th_new = np.where((th <= a0) | (amax >= np.deg2rad(179.0)), th, squeezed)
+    perp = u.copy()
+    perp[:, 0] = 0
+    pn = np.linalg.norm(perp, axis=1, keepdims=True)
+    perp = np.where(pn > 1e-6, perp / np.maximum(pn, 1e-9), np.array([0, 0, -1.0]))
+    return (np.cos(th_new)[:, None] * np.array([1.0, 0, 0]) + np.sin(th_new)[:, None] * perp) * n
+
+
 def targets(kp: dict, side: str, ik: ArmIk, pitch: float, k: float, c: np.ndarray,
-            a0: float = 180.0, amax: float = 180.0):
+            a0: float = 180.0, amax: float = 180.0, mapping: Mapping | None = None):
     A = pitch_matrix(pitch)
     sh, el, wr = kp[f"{side}_shoulder"], kp[f"{side}_elbow"], kp[f"{side}_wrist"]
-    wv = compress_cone((wr - sh) @ A.T, a0, amax)
+    squeeze = (lambda v: map_dirs(v, side, mapping)) if mapping else (lambda v: compress_cone(v, a0, amax))
+    wv = squeeze((wr - sh) @ A.T)
     wt = ik.shoulder + c + k * wv
-    u = compress_cone((el - sh) @ A.T, a0, amax)
+    u = squeeze((el - sh) @ A.T)
     et = ik.shoulder + L_UPPER * u / np.linalg.norm(u, axis=1, keepdims=True)
     f = (wr - el) @ A.T
     hd = f / np.linalg.norm(f, axis=1, keepdims=True)
@@ -113,8 +173,9 @@ def neutral_posture(arm):
 
 def _seeds(arm):
     b = _branch(arm)
+    out = 1.0 if arm == "left" else -1.0   # J1 toward the outboard (sideways) solutions
     return [b + np.array([d1, d2, d3, 0, 0, 0, 0])
-            for d1 in (-0.8, 0, 0.8) for d2 in (-0.5, 0.0, 0.4) for d3 in (-0.6, 0.6)]
+            for d1 in (-0.8, 0, 0.8, 1.6 * out, 2.4 * out) for d2 in (-0.5, 0.0, 0.4) for d3 in (-0.6, 0.6)]
 
 
 def seed_solve(ik: ArmIk, wt, et, hd, q_prev=None, q_post=None, cont_w=0.05):
@@ -134,9 +195,12 @@ def seed_solve(ik: ArmIk, wt, et, hd, q_prev=None, q_post=None, cont_w=0.05):
 
 
 def run_clip(ik: ArmIk, kp: dict, side: str, pitch, k, c, stride=1, clearance=True,
-             a0=180.0, amax=180.0, restart_tol=None, obstacles=None):
-    """obstacles: optional per-output-frame point clouds (e.g. the other arm) to keep clear of."""
-    wt, et, hd = targets(kp, side, ik, pitch, k, np.asarray(c, float), a0, amax)
+             a0=180.0, amax=180.0, restart_tol=None, obstacles=None, mapping: Mapping | None = None):
+    """obstacles: optional per-output-frame point clouds (e.g. the other arm) to keep clear of.
+    mapping: a Mapping (overrides pitch/k/a0/amax)."""
+    if mapping is not None:
+        pitch, k = mapping.pitch, mapping.k
+    wt, et, hd = targets(kp, side, ik, pitch, k, np.asarray(c, float), a0, amax, mapping)
     idx = np.arange(0, len(wt), stride)
     q_post = neutral_posture(ik.arm)
     q = seed_solve(ik, wt[0], et[0], hd[0], q_post=q_post)
@@ -153,78 +217,16 @@ def run_clip(ik: ArmIk, kp: dict, side: str, pitch, k, c, stride=1, clearance=Tr
     return np.array(Q), np.array(err), np.array(clr), idx
 
 
-def _eval_combo(args):
-    pitch, k, a0, amax, clips, stride = args
-    out = {}
-    iks = {s: ArmIk(s, weights=IK_WEIGHTS) for s in ("left", "right")}
-    for clip in clips:
-        kp = arm_keypoints(BVH_DIR / f"{clip}.bvh")
-        for side in ("left", "right"):
-            Q, err, clr, _ = run_clip(iks[side], kp, side, pitch, k, (0, 0, 0), stride=stride, a0=a0, amax=amax)
-            sp = np.abs(np.diff(Q, axis=0)).max(axis=1) * kp["fps"] / stride
-            out[f"{clip}/{side}"] = dict(track=float(np.mean(err < WRIST_TOL)),
-                                         speed_p50=float(np.percentile(sp, 50)),
-                                         speed_p90=float(np.percentile(sp, 90)),
-                                         clear=float(np.mean(clr >= CLEARANCE_MIN)),
-                                         ok=float(np.mean((err < WRIST_TOL) & (clr >= CLEARANCE_MIN))))
-    return (pitch, k, a0, amax), out
-
-
-def sweep(args):
-    grid = list(itertools.product(args.pitch, args.k, args.a0, args.amax))
-    jobs = [(p, k, a0, am, CANDIDATES, args.stride) for p, k, a0, am in grid]
-    results = {}
-    with ProcessPoolExecutor(max_workers=min(len(jobs), args.workers)) as ex:
-        for key, out in ex.map(_eval_combo, jobs):
-            results[key] = out
-            ok = np.mean([v["ok"] for v in out.values()])
-            tr = np.mean([v["track"] for v in out.values()])
-            cl = np.mean([v["clear"] for v in out.values()])
-            s50 = np.median([v["speed_p50"] for v in out.values()])
-            s90 = np.median([v["speed_p90"] for v in out.values()])
-            print(f"pitch={key[0]:>4} k={key[1]:.2f} a0={key[2]:>4} amax={key[3]:>4}  ok={ok:.3f} track={tr:.3f} clear={cl:.3f} speed50={s50:.2f} speed90={s90:.2f}", flush=True)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps({str(k): v for k, v in results.items()}, indent=1))
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--sweep", action="store_true")
-    ap.add_argument("--process", action="store_true", help="full-rate retarget of CANDIDATES with CHOSEN")
-    ap.add_argument("--pitch", type=float, nargs="+", default=[0, 25, 45])
-    ap.add_argument("--k", type=float, nargs="+", default=[0.8, 1.0, 1.2])
-    ap.add_argument("--a0", type=float, nargs="+", default=[30, 50])
-    ap.add_argument("--amax", type=float, nargs="+", default=[70, 80])
-    ap.add_argument("--stride", type=int, default=6)
-    ap.add_argument("--workers", type=int, default=24)
-    ap.add_argument("--out", type=Path, default=None, help="sweep output (default <set dir>/sweep.json)")
-    ap.add_argument("--set", default=None, help="reference set to write (required for --process; v1 is frozen)")
-    ap.add_argument("--allow-v1", action="store_true")
-    a = ap.parse_args()
-    global RET_DIR
-    if a.process and not a.set:
-        raise SystemExit("--process needs --set (v2, v1b, cand_A, ...)")
-    RET_DIR = panda_sets.get(a.set or "scratch", write=True, allow_v1=a.allow_v1).ret
-    if a.out is None:
-        a.out = RET_DIR / "sweep.json"
-    a.out.parent.mkdir(parents=True, exist_ok=True)
-    if a.sweep:
-        sweep(a)
-    if a.process:
-        process(a)
-
-
-
 # --------------------------------------------------------------------------
-# Full-rate processing of the chosen mapping
+# One pipeline for process and sweep (stage 5): both arms, left first, the right arm
+# avoids the left arm; validity = clearance, inter-arm distance and (new) wrist error.
 # --------------------------------------------------------------------------
-CHOSEN = dict(pitch=0.0, k=1.0, a0=30.0, amax=50.0)   # from runs/panda_retarget/sweep*.log
 SPEED_REF = 0.3        # target peak joint speed of the reference (0.6 x 0.5 rad/s cap)
 MIN_SEG_S = 5.0
 
 
 def gaussian_smooth(x: np.ndarray, sigma: float) -> np.ndarray:
-    r = int(3 * sigma)
+    r = max(1, int(3 * sigma))
     k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
     k /= k.sum()
     xp = np.pad(x, ((r, r), (0, 0)), mode="edge")
@@ -243,34 +245,31 @@ def segments(mask: np.ndarray, min_len: int):
     return out
 
 
-def _process_clip(clip: str):
+def retarget_clip(clip: str, m: Mapping, stride: int = 1) -> dict:
+    """Retarget one clip with mapping m. Returns per-frame arrays (at source fps / stride)."""
     kp = arm_keypoints(BVH_DIR / f"{clip}.bvh")
-    fps = kp["fps"]
-    iks = {s: ArmIk(s, weights=IK_WEIGHTS) for s in ("left", "right")}
+    fps = kp["fps"] / stride
+    iks = {s: ArmIk(s, weights=m.weights()) for s in ("left", "right")}
     Q, err = {}, {}
-    # left first; the right arm then treats the left arm (coarse cloud) as an obstacle
-    q, e, _, _ = run_clip(iks["left"], kp, "left", CHOSEN["pitch"], CHOSEN["k"], (0, 0, 0),
-                          stride=1, clearance=False, a0=CHOSEN["a0"], amax=CHOSEN["amax"])
-    Q["left"], err["left"] = gaussian_smooth(q, 2.0), e
+    q, e, _, idx = run_clip(iks["left"], kp, "left", 0, 0, (0, 0, 0), stride=stride, clearance=False, mapping=m)
+    Q["left"], err["left"] = gaussian_smooth(q, 2.0 / stride), e
     clouds = []
     for t in range(len(Q["left"])):
         iks["left"].set_q(Q["left"][t])
         clouds.append(iks["left"].coarse_world_verts())
-    q, e, _, _ = run_clip(iks["right"], kp, "right", CHOSEN["pitch"], CHOSEN["k"], (0, 0, 0),
-                          stride=1, clearance=False, a0=CHOSEN["a0"], amax=CHOSEN["amax"],
-                          obstacles=clouds)
-    Q["right"], err["right"] = gaussian_smooth(q, 2.0), e
+    q, e, _, _ = run_clip(iks["right"], kp, "right", 0, 0, (0, 0, 0), stride=stride, clearance=False,
+                          obstacles=clouds, mapping=m)
+    Q["right"], err["right"] = gaussian_smooth(q, 2.0 / stride), e
     L, R = iks["left"], iks["right"]
-    m, d = L.m, L.d
+    d = L.d
     T = len(Q["left"])
     clr = {"left": np.zeros(T), "right": np.zeros(T)}
     who = {"left": [], "right": []}
     inter = np.zeros(T)
-    ft = np.zeros(6)
     for t in range(T):
         d.qpos[L.qadr] = Q["left"][t]
         d.qpos[R.qadr] = Q["right"][t]
-        mujoco.mj_kinematics(m, d)
+        mujoco.mj_kinematics(L.m, d)
         for side, ik in (("left", L), ("right", R)):
             ik.d.qpos[:] = d.qpos
             mujoco.mj_kinematics(ik.m, ik.d)
@@ -279,7 +278,14 @@ def _process_clip(clip: str):
             who[side].append(w)
         inter[t] = inter_arm_distance(L, R)
     valid = (clr["left"] >= CLEARANCE_MIN) & (clr["right"] >= CLEARANCE_MIN) & (inter >= CLEARANCE_MIN)
-    Qb = np.concatenate([Q["left"], Q["right"]], axis=1)
+    if m.wrist_tol_valid is not None:
+        valid &= (err["left"] <= m.wrist_tol_valid) & (err["right"] <= m.wrist_tol_valid)
+    return dict(clip=clip, kp=kp, idx=idx, fps=fps, Q=np.concatenate([Q["left"], Q["right"]], axis=1),
+                err=err, clr=clr, who=who, inter=inter, valid=valid)
+
+
+def clip_summary(r: dict) -> dict:
+    Qb, fps, valid, T = r["Q"], r["fps"], r["valid"], len(r["valid"])
     qd = np.gradient(Qb, axis=0) * fps
     segs = []
     for a, b in segments(valid, int(MIN_SEG_S * fps)):
@@ -287,31 +293,64 @@ def _process_clip(clip: str):
         segs.append(dict(start=a, end=b, seconds=(b - a) / fps, peak_speed=peak,
                          p99_speed=float(np.percentile(np.abs(qd[a:b]).max(axis=1), 99)),
                          slowdown=max(1.0, peak / SPEED_REF)))
-    out_dir = RET_DIR / "clips"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(out_dir / f"{clip}.npz", q=Qb, fps=fps, valid=valid, clr_left=clr["left"],
-                        clr_right=clr["right"], inter=inter, err_left=err["left"], err_right=err["right"])
     fails = {}
     for side in ("left", "right"):
-        bad = [w for w, c in zip(who[side], clr[side]) if c < CLEARANCE_MIN]
+        bad = [w for w, c in zip(r["who"][side], r["clr"][side]) if c < CLEARANCE_MIN]
         for w in set(bad):
             fails[f"{side}:{w}"] = bad.count(w) / T
-    fails["inter_arm"] = float(np.mean(inter < CLEARANCE_MIN))
-    return clip, dict(frames=T, seconds=T / fps, valid=float(valid.mean()),
-                      track_left=float(np.mean(err["left"] < WRIST_TOL)),
-                      track_right=float(np.mean(err["right"] < WRIST_TOL)),
-                      fails=fails, segments=segs)
+        fails[f"{side}:wrist_err"] = float(np.mean(r["err"][side] > (MAPPING_TOL or 9)))
+    fails["inter_arm"] = float(np.mean(r["inter"] < CLEARANCE_MIN))
+    return dict(frames=T, seconds=T / fps, valid=float(valid.mean()),
+                track_left=float(np.mean(r["err"]["left"] < WRIST_TOL)),
+                track_right=float(np.mean(r["err"]["right"] < WRIST_TOL)),
+                fails=fails, segments=segs)
 
 
-def process(args):
+MAPPING_TOL = None   # wrist_tol_valid of the mapping being processed (for the fail report)
+
+
+def _process_clip(job):
+    clip, m = job
+    global MAPPING_TOL
+    MAPPING_TOL = m.wrist_tol_valid
+    r = retarget_clip(clip, m, stride=1)
+    out_dir = RET_DIR / "clips"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(out_dir / f"{clip}.npz", q=r["Q"], fps=r["fps"], valid=r["valid"],
+                        clr_left=r["clr"]["left"], clr_right=r["clr"]["right"], inter=r["inter"],
+                        err_left=r["err"]["left"], err_right=r["err"]["right"])
+    return clip, clip_summary(r)
+
+
+def process(args, m: Mapping):
     summary = {}
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
-        for clip, s in ex.map(_process_clip, CANDIDATES):
+        for clip, s in ex.map(_process_clip, [(c, m) for c in CANDIDATES]):
             summary[clip] = s
             seg_s = sum(x["seconds"] for x in s["segments"])
             print(f"{clip:28s} {s['seconds']:6.1f}s valid={s['valid']:.2f} segs={len(s['segments'])} "
                   f"seg_total={seg_s:6.1f}s fails={ {k: round(v, 2) for k, v in s['fails'].items() if v > 0.01} }", flush=True)
     (RET_DIR / "summary.json").write_text(json.dumps(summary, indent=1))
+    (RET_DIR / "mapping.json").write_text(json.dumps(asdict(m), indent=1))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--process", action="store_true", help="full-rate retarget of CANDIDATES")
+    ap.add_argument("--mapping", type=Path, default=None,
+                    help="JSON with Mapping fields (default: V1, the stage-4 cone)")
+    ap.add_argument("--workers", type=int, default=24)
+    ap.add_argument("--set", default=None, help="reference set to write (v1 is frozen)")
+    ap.add_argument("--allow-v1", action="store_true")
+    a = ap.parse_args()
+    global RET_DIR
+    if not (a.process and a.set):
+        raise SystemExit("usage: --process --set <name> [--mapping m.json]   (the sweep is tools/retarget_sweep.py)")
+    RET_DIR = panda_sets.get(a.set, write=True, allow_v1=a.allow_v1).ret
+    RET_DIR.mkdir(parents=True, exist_ok=True)
+    m = Mapping(**json.loads(a.mapping.read_text())) if a.mapping else V1
+    print("mapping:", asdict(m))
+    process(a, m)
 
 
 if __name__ == "__main__":
