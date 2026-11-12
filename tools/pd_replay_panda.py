@@ -29,7 +29,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import panda_sets  # noqa: E402
-from panda_arm_ik import ArmIk, inter_arm_distance  # noqa: E402
+from panda_arm_ik import DUAL_XML, ArmIk, inter_arm_distance  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 PACK = REPO / "src" / "unisupermimic" / "assets" / "motions" / "panda" / "lafan1_panda_dual.pt"
@@ -54,6 +54,12 @@ def replay(args):
     arm_bodies = {i for i in range(m.nbody) if m.body(i).name.startswith(("left/", "right/"))}
     q_err, w_err_l, w_err_r, sat, contacts, clr, inter = [], [], [], 0, 0, [], []
     dref = mujoco.MjData(m)
+    # gravity: the model compensates it (gravcomp=1, like libfranka), so the motor torque above
+    # never contains it; the real joint torque is tau_pd + tau_g. Checked once per control tick.
+    mg = mujoco.MjModel.from_xml_path(str(DUAL_XML))
+    mg.body_gravcomp[:] = 0.0
+    dg = mujoco.MjData(mg)
+    total_max, grav_max, sat_total = np.zeros(J), np.zeros(J), 0
     for t in range(len(q_ref)):
         # reference wrist positions
         dref.qpos[:] = q_ref[t]
@@ -67,6 +73,13 @@ def replay(args):
                 b1, b2 = m.geom_bodyid[c.geom1], m.geom_bodyid[c.geom2]
                 if (b1 in arm_bodies or b2 in arm_bodies) and c.dist < 0:
                     contacts += 1
+        dg.qpos[:] = d.qpos
+        dg.qvel[:] = 0
+        mujoco.mj_forward(mg, dg)
+        tg = dg.qfrc_bias[:J]
+        tot = np.abs(tau + tg)
+        total_max, grav_max = np.maximum(total_max, tot), np.maximum(grav_max, np.abs(tg))
+        sat_total += int(np.any(tot > 0.8 * TAU_MAX))
         q_err.append(d.qpos - q_ref[t])
         w_err_l.append(np.linalg.norm(d.xpos[wl] - dref.xpos[wl]))
         w_err_r.append(np.linalg.norm(d.xpos[wr] - dref.xpos[wr]))
@@ -86,6 +99,8 @@ def replay(args):
         wrist_rmse_mm_right=float(1000 * np.sqrt(np.mean(np.square(w_err_r)))),
         wrist_max_mm=float(1000 * max(max(w_err_l), max(w_err_r))),
         sat_frac=sat / n_steps, contacts=contacts,
+        grav_tau_max=np.round(grav_max, 1).tolist(), total_tau_max=np.round(total_max, 1).tolist(),
+        total_over_08_frac=sat_total / len(q_ref),
         min_clearance=float(min(clr)), min_inter_arm=float(min(inter)))
 
 
@@ -115,6 +130,8 @@ def main():
               f"wrist_rmse L/R={avg('wrist_rmse_mm_left'):.1f}/{avg('wrist_rmse_mm_right'):.1f} mm  "
               f"wrist_max={max(x['wrist_max_mm'] for x in v):.1f} mm  "
               f"sat_frac={avg('sat_frac'):.2e}  contacts={sum(x['contacts'] for x in v)}  "
+              f"tau_g+pd>0.8max={avg('total_over_08_frac'):.2e}  "
+              f"max|tau_g| J1-4={np.max([x['grav_tau_max'][:4] + x['grav_tau_max'][7:11] for x in v]):.1f} Nm  "
               f"min_clear={min(x['min_clearance'] for x in v):.3f} m  "
               f"min_inter={min(x['min_inter_arm'] for x in v):.3f} m", flush=True)
     # v1's original pd_replay.json (old geometry) is kept; re-runs on v1 go next to it
